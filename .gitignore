@@ -1,0 +1,14 @@
+# exported-id state (local, per-machine)
+.anarlog_obsidian_state.json
+*.anarlog_obsidian_state.json
+
+# logs
+*.log
+*.err
+
+# python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

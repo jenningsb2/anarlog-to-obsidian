@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template for anarlog-to-obsidian (macOS).
+
+  Replace the placeholders below, then:
+    cp com.example.anarlog-obsidian.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.example.anarlog-obsidian.plist
+
+  Placeholders:
+    /ABSOLUTE/PATH/TO/anarlog_to_obsidian.py  -> where you cloned the script
+    /ABSOLUTE/PATH/TO/YOUR/VAULT              -> your Obsidian vault root
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.anarlog-obsidian</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/ABSOLUTE/PATH/TO/anarlog_to_obsidian.py</string>
+    </array>
+
+    <!-- The script reads its vault from this env var. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ANARLOG_VAULT</key>
+        <string>/ABSOLUTE/PATH/TO/YOUR/VAULT</string>
+    </dict>
+
+    <!-- Run daily at 18:00. If the Mac was asleep, launchd runs it on wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/anarlog-obsidian.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/anarlog-obsidian.err</string>
+</dict>
+</plist>
