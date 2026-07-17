@@ -35,7 +35,13 @@ audio: "Attachments/2026-07-16 Weekly Product Sync.mp3"
 - ...
 
 ## Transcript
+
+<full meeting transcript, as provided by anarlog's export>
 ```
+
+> Note: anarlog's Markdown export already includes the transcript (plain text).
+> It does not carry per-person speaker names — words are only tagged by audio
+> channel (mic vs. system) — so no speaker labels are added.
 
 ## How it works
 
