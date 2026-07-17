@@ -87,17 +87,72 @@ Set via environment variables (or the few flags below). Flags win over env vars.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ANARLOG_VAULT` | *(required)* | Obsidian vault root. |
-| `ANARLOG_SUBDIR` | `Meetings` | Folder in the vault for notes (`<subdir>/YYYY-MM/`). |
+| `ANARLOG_SUBDIR` | `Meetings` | Base folder in the vault for notes. |
 | `ANARLOG_ATTACH_SUBDIR` | `Attachments` | Folder in the vault for audio copies. |
 | `ANARLOG_STATE` | `~/.anarlog_obsidian_state.json` | Where exported ids are tracked. |
 | `ANARLOG_SESSIONS` | `~/Library/Application Support/anarlog/sessions` | Anarlog's per-meeting recording folders. Override off macOS. |
+| `ANARLOG_TEMPLATE` | *(built-in)* | Path to a note template (see below). |
+| `ANARLOG_FILENAME` | `{year}-{month}/{date} {title}.md` | Filename pattern, relative to the notes folder. |
+| `ANARLOG_DATE_FORMAT` | `%Y-%m-%d` | strftime format for the `{date}` filename placeholder. |
 | `ANARLOG_COPY_AUDIO` | `1` | Copy audio into the vault (`0` to disable). |
 | `ANARLOG_TRANSCODE` | `1` | Transcode audio with ffmpeg (`0` copies verbatim). |
 | `ANARLOG_AUDIO_BITRATE` | `32k` | Target audio bitrate. |
 | `ANARLOG_AUDIO_CHANNELS` | `1` | Audio channels (`1` = mono; ideal for speech). |
 
-Flags: `--vault PATH`, `--dry-run`, `--no-audio`, `--limit N` (only the N most
-recent meetings). See `--help`.
+Flags: `--vault PATH`, `--template PATH`, `--filename PATTERN`, `--dry-run`,
+`--no-audio`, `--limit N` (only the N most recent meetings). See `--help`.
+
+## Customizing the output
+
+Both the **note layout** and the **filename** are template-driven, so you can
+reshape everything without editing the script.
+
+### Note template
+
+Point `--template` (or `ANARLOG_TEMPLATE`) at a Markdown file using
+[`string.Template`](https://docs.python.org/3/library/string.html#template-strings)
+`${...}` placeholders. Escape a literal dollar sign as `$$`. Available variables:
+
+| Variable | Contents |
+|---|---|
+| `${title}` | Meeting title (raw). |
+| `${title_yaml}` | Title as a quoted YAML/JSON string (safe for frontmatter). |
+| `${date}` | Local start time, `YYYY-MM-DDTHH:MM`. |
+| `${date_only}` | Local start date, `YYYY-MM-DD`. |
+| `${anarlog_id}` | Meeting id. |
+| `${source}` | Literal `anarlog`. |
+| `${attendees_block}` | Ready-made `attendees:` YAML block (empty if none). |
+| `${attendees_csv}` | Attendees as a comma-separated list. |
+| `${audio_field}` | Ready-made `audio: "..."` frontmatter line (empty if none). |
+| `${audio_embed}` | `![[file.mp3]]` embed (empty if none). |
+| `${audio_path}` | Vault-relative audio path (empty if none). |
+| `${body}` | The full normalised body (`## Notes` / `## Summary` / `## Transcript`). |
+| `${notes}` / `${summary}` / `${transcript}` | Just that section's content. |
+
+The `_block` / `_field` / `_embed` variables include their own trailing newline
+(or are empty), so absent data leaves no stray blank lines. The built-in default
+template is:
+
+```
+---
+title: ${title_yaml}
+date: ${date}
+anarlog-id: ${anarlog_id}
+source: ${source}
+${attendees_block}${audio_field}---
+
+${audio_embed}${body}
+```
+
+(A copy lives at [`examples/note.md`](examples/note.md) to start from.)
+
+### Filename pattern
+
+`--filename` (or `ANARLOG_FILENAME`) is a `str.format` pattern, relative to the
+notes folder, with `{...}` placeholders: `{date}`, `{time}`, `{title}`, `{id}`,
+`{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`. It may include subfolders.
+Examples: `{date} - {title}.md` (flat), `{year}/{month}/{date} {title}.md`.
+Paths that are absolute or contain `..` are rejected.
 
 ### A note on audio size
 

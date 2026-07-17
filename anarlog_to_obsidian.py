@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Incrementally export Anarlog meetings into an Obsidian vault as Markdown.
 
-For each new meeting it writes a note to ``<vault>/<subdir>/YYYY-MM/`` with YAML
-frontmatter (title, date, anarlog-id, source, attendees, audio), normalises
-Anarlog's heading levels, and — optionally — copies the recording into the
+For each new meeting it renders a note from a template (frontmatter, attendees,
+audio embed, normalised body) and — optionally — copies the recording into the
 vault's attachments folder (transcoded to a small mono mp3) so the audio link
 resolves on every device the vault syncs to.
+
+The note layout and the filename are both **template-driven** (see the
+`--template` / `--filename` options and the README), so you can reshape the
+output without editing this script.
 
 Design goals:
 
@@ -17,8 +20,6 @@ Design goals:
 
 Requirements: the ``anarlog`` CLI on PATH, Python 3.8+, and (optional, for audio
 transcoding) ``ffmpeg``. No third-party Python packages.
-
-Configuration is via environment variables or flags — see ``--help`` and README.
 """
 
 import argparse
@@ -32,6 +33,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from shutil import which
+from string import Template
 
 
 # ---- configuration ----------------------------------------------------------
@@ -50,7 +52,7 @@ def _env_bool(name, default):
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Where notes live inside the vault: <vault>/<SUBDIR>/YYYY-MM/<note>.md
+# Where notes live inside the vault: <vault>/<SUBDIR>/<rendered filename>
 SUBDIR = _env("ANARLOG_SUBDIR", "Meetings")
 # Where audio copies live inside the vault: <vault>/<ATTACH_SUBDIR>/
 ATTACH_SUBDIR = _env("ANARLOG_ATTACH_SUBDIR", "Attachments")
@@ -72,11 +74,33 @@ TRANSCODE = _env_bool("ANARLOG_TRANSCODE", True)
 AUDIO_BITRATE = _env("ANARLOG_AUDIO_BITRATE", "32k")
 AUDIO_CHANNELS = _env("ANARLOG_AUDIO_CHANNELS", "1")
 
+# Templates. The note template uses ${...} placeholders (string.Template); the
+# filename pattern uses {...} placeholders (str.format). Both are overridable.
+DEFAULT_FILENAME = "{year}-{month}/{date} {title}.md"
+FILENAME_PATTERN = _env("ANARLOG_FILENAME", DEFAULT_FILENAME)
+DATE_FORMAT = _env("ANARLOG_DATE_FORMAT", "%Y-%m-%d")
+NOTE_TEMPLATE_PATH = _env("ANARLOG_TEMPLATE")  # path to a .md template, else built-in
+
+# Built-in default note template. Renders the same layout the tool shipped with:
+# YAML frontmatter, an audio embed, then the normalised body. The ${..._block}
+# / ${audio_field} / ${audio_embed} variables already include their own trailing
+# newline (or are empty), so absent data leaves no stray blank lines.
+DEFAULT_NOTE_TEMPLATE = """\
+---
+title: ${title_yaml}
+date: ${date}
+anarlog-id: ${anarlog_id}
+source: ${source}
+${attendees_block}${audio_field}---
+
+${audio_embed}${body}"""
+
 PAGE_SIZE = 200  # anarlog `meetings list` caps --limit at 200; we paginate.
 
 # Set from CLI in main().
 VAULT = None
 DRY_RUN = False
+TEMPLATE_STR = DEFAULT_NOTE_TEMPLATE
 
 
 def ffmpeg_bin():
@@ -169,10 +193,6 @@ def meeting_date(m):
     return datetime.now().astimezone()
 
 
-def has_frontmatter(text):
-    return text.lstrip().startswith("---")
-
-
 def _yaml_scalar(v):
     # Plain scalar for simple values (emails, names); quote anything else so the
     # YAML stays valid (e.g. names with apostrophes or colons).
@@ -224,23 +244,87 @@ def transform_body(raw):
     return "\n".join(cleaned) + "\n", attendees
 
 
-def build_frontmatter(m, dt, audio_name=None, attendees=None):
-    """YAML frontmatter block: title (quoted), local ISO-minute date, ids, tags,
-    attendees list, and a vault-relative audio path."""
-    lines = [
-        "---",
-        f"title: {json.dumps(m.get('title') or 'Untitled')}",
-        f"date: {dt.strftime('%Y-%m-%dT%H:%M')}",
-        f"anarlog-id: {m.get('id')}",
-        "source: anarlog",
-    ]
-    if attendees:
-        lines.append("attendees:")
-        lines += [f"  - {_yaml_scalar(a)}" for a in attendees]
-    if audio_name is not None:
-        lines.append(f"audio: {json.dumps(f'{ATTACH_SUBDIR}/{audio_name}')}")
-    lines += ["---", "", ""]
-    return "\n".join(lines)
+def split_sections(body):
+    """Map lowercased `## Section` name -> its content (stripped). Lets templates
+    reference ${notes} / ${summary} / ${transcript} individually."""
+    sections, cur, buf = {}, None, []
+    for ln in body.splitlines():
+        h = re.match(r"^##\s+(.+?)\s*$", ln)
+        if h:
+            if cur is not None:
+                sections[cur] = "\n".join(buf).strip()
+            cur, buf = h.group(1).strip().lower(), []
+        elif cur is not None:
+            buf.append(ln)
+    if cur is not None:
+        sections[cur] = "\n".join(buf).strip()
+    return sections
+
+
+def attendees_block(attendees):
+    """A ready-to-drop YAML block (`attendees:\\n  - a\\n ...`) with a trailing
+    newline, or "" when there are none."""
+    if not attendees:
+        return ""
+    return "attendees:\n" + "".join(f"  - {_yaml_scalar(a)}\n" for a in attendees)
+
+
+def render_context(m, dt, audio_name, attendees, body):
+    """Variables available to the note template."""
+    title = m.get("title") or "Untitled"
+    audio_rel = f"{ATTACH_SUBDIR}/{audio_name}" if audio_name else ""
+    sections = split_sections(body)
+    return {
+        "title": title,
+        "title_yaml": json.dumps(title),
+        "date": dt.strftime("%Y-%m-%dT%H:%M"),
+        "date_only": dt.strftime("%Y-%m-%d"),
+        "anarlog_id": m.get("id") or "",
+        "source": "anarlog",
+        "attendees_block": attendees_block(attendees),
+        "attendees_csv": ", ".join(attendees),
+        "audio_field": f"audio: {json.dumps(audio_rel)}\n" if audio_name else "",
+        "audio_embed": f"![[{audio_name}]]\n\n" if audio_name else "",
+        "audio_path": audio_rel,
+        "body": body if body.endswith("\n") else body + "\n",
+        "notes": sections.get("notes", ""),
+        "summary": sections.get("summary", ""),
+        "transcript": sections.get("transcript", ""),
+    }
+
+
+def render_note(ctx):
+    """Substitute ctx into the note template and tidy stray blank lines."""
+    try:
+        text = Template(TEMPLATE_STR).substitute(ctx)
+    except KeyError as exc:
+        sys.exit(f"Template references unknown variable ${{{exc.args[0]}}}. "
+                 f"Available: {', '.join(sorted(ctx))}")
+    except ValueError as exc:  # malformed $ in the template
+        sys.exit(f"Template syntax error (escape literal '$' as '$$'): {exc}")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.rstrip("\n") + "\n"
+
+
+def render_filename(pattern, dt, title, mid):
+    """Render a vault-relative note path from the filename pattern."""
+    ph = {
+        "date": dt.strftime(DATE_FORMAT),
+        "time": dt.strftime("%H%M"),
+        "title": sanitize(title),
+        "id": mid, "session_id": mid,
+        "year": f"{dt.year:04d}", "month": f"{dt.month:02d}", "day": f"{dt.day:02d}",
+        "hour": f"{dt.hour:02d}", "minute": f"{dt.minute:02d}",
+    }
+    try:
+        rendered = pattern.format(**ph)
+    except (KeyError, IndexError) as exc:
+        sys.exit(f"Filename pattern references unknown placeholder {exc}. "
+                 f"Available: {', '.join('{' + k + '}' for k in sorted(ph))}")
+    rel = Path(rendered)
+    if rel.is_absolute() or ".." in rel.parts:
+        sys.exit(f"Filename pattern produced an unsafe path: {rendered!r}")
+    return rel
 
 
 # ---- audio ------------------------------------------------------------------
@@ -315,12 +399,10 @@ def process(m, exported):
         return None  # not marked exported; retried next run
 
     dt = meeting_date(m)
-    out_dir = VAULT / SUBDIR / dt.strftime("%Y-%m")
-    base = f"{dt.strftime('%Y-%m-%d')} {sanitize(m.get('title'))}"
-    out = out_dir / f"{base}.md"
+    out = VAULT / SUBDIR / render_filename(FILENAME_PATTERN, dt, m.get("title"), mid)
     n = 2
     while out.exists():  # never overwrite an existing vault file
-        out = out_dir / f"{base} {n}.md"
+        out = out.with_name(f"{out.stem} {n}{out.suffix}")
         n += 1
 
     if DRY_RUN:
@@ -328,14 +410,10 @@ def process(m, exported):
         exported.add(mid)
         return out
 
-    out_dir.mkdir(parents=True, exist_ok=True)
     audio_name = copy_audio_into_vault(mid, out.stem) if COPY_AUDIO else None
-    if has_frontmatter(body):
-        content = body
-    else:
-        clean_body, attendees = transform_body(body)
-        embed = f"![[{audio_name}]]\n\n" if audio_name else ""
-        content = build_frontmatter(m, dt, audio_name, attendees) + embed + clean_body
+    clean_body, attendees = transform_body(body)
+    content = render_note(render_context(m, dt, audio_name, attendees, clean_body))
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(content)
 
     exported.add(mid)
@@ -344,11 +422,17 @@ def process(m, exported):
 
 
 def main():
-    global VAULT, DRY_RUN
+    global VAULT, DRY_RUN, COPY_AUDIO, FILENAME_PATTERN, TEMPLATE_STR
     parser = argparse.ArgumentParser(
         description="Export Anarlog meetings into an Obsidian vault as Markdown.")
     parser.add_argument("--vault", default=_env("ANARLOG_VAULT"),
                         help="Obsidian vault root (or set ANARLOG_VAULT).")
+    parser.add_argument("--template", default=NOTE_TEMPLATE_PATH,
+                        help="Path to a note template (${var} placeholders). "
+                             "Defaults to the built-in template.")
+    parser.add_argument("--filename", default=FILENAME_PATTERN,
+                        help="Filename pattern with {var} placeholders "
+                             f"(default: {DEFAULT_FILENAME!r}).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be exported without writing anything.")
     parser.add_argument("--no-audio", action="store_true",
@@ -363,12 +447,16 @@ def main():
     if not VAULT.is_dir():
         sys.exit(f"Vault not found: {VAULT}")
     DRY_RUN = args.dry_run
+    FILENAME_PATTERN = args.filename
     if args.no_audio:
-        global COPY_AUDIO
         COPY_AUDIO = False
+    if args.template:
+        try:
+            TEMPLATE_STR = Path(args.template).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            sys.exit(f"Could not read template {args.template}: {e}")
 
     exported = set(json.loads(STATE.read_text())) if STATE.exists() else set()
-    before = len(exported)
 
     new = 0
     for m in list_all_meetings(limit=args.limit):
@@ -378,8 +466,7 @@ def main():
     if not DRY_RUN:
         STATE.write_text(json.dumps(sorted(exported)))
     print(f"done — {new} new, {len(exported)} total tracked"
-          + (" (dry-run, nothing written)" if DRY_RUN else "")
-          + (f", {len(exported) - before} newly seen" if DRY_RUN else ""))
+          + (" (dry-run, nothing written)" if DRY_RUN else ""))
 
 
 if __name__ == "__main__":
