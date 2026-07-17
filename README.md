@@ -1,4 +1,4 @@
-# anarlog-to-obsidian
+  # anarlog-to-obsidian
 
 Automatically export your [Anarlog](https://docs.anarlog.so) meeting recordings
 into an [Obsidian](https://obsidian.md) vault as clean Markdown notes — with
@@ -139,9 +139,11 @@ title: ${title_yaml}
 date: ${date}
 anarlog-id: ${anarlog_id}
 source: ${source}
-${attendees_block}${audio_field}---
+${attendees_block}${audio_field}
+---
 
-${audio_embed}${body}
+${audio_embed}
+${body}
 ```
 
 (A copy lives at [`examples/note.md`](examples/note.md) to start from.)
